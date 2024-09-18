@@ -1,0 +1,203 @@
+---
+title: "Project"
+output: pdf_document
+date: "2023-11-21"
+---
+
+Goal: Optimizing Policy Revenue Predictions Using Calibrated Probabilistic Classifiers Under Class Imbalance
+
+```{r}
+library(caret)
+library(glmnet)
+library(randomForest)
+library(verification)
+library(rms)
+library(zoo)
+library(gbm)
+library(pROC)
+library(dplyr)
+library(DescTools)
+```
+
+```{r}
+df = read.csv('aug_train.csv')
+#Dropping the id column since we already have dataframe indices as their unique ID
+df = df[, !names(df) %in% 'id']
+head(df)
+```
+
+
+Description of features:
+
+Gender: Describes the gender of a customer
+Age: Describes the age of a customer
+Driving_license: An binary feature which takes the value of 1 when the customer possess a driving license
+Region_code: The region a customer belongs to (Ranging from 0 to 52)
+Previously_Insured: A binary feature which takes the value of 1 when the customer possessed a vehicle insurance before.
+Vehicle_Age: Describes the age of a customer's vehicle
+Vehicle_Damage: A feature taking the values of either Yes or No according to if a customer's vehicle is damaged or not
+Annual_Premium: Amount of premium a customer will pay if they buy a vehicle insurance (Currency undefined)
+Policy_Sales_Channel: The unique identifier of referral agency
+Vintage: The number of days the customer has been associated with the company
+Response: A binary feature which takes the value of 1 when the customer purchased a vehicle insurance.
+```{r}
+#Making factors of some categorical variables
+df$Region_Code <- as.factor(df$Region_Code)
+df$Policy_Sales_Channel <- as.factor(df$Policy_Sales_Channel)
+df$Previously_Insured <- as.factor(df$Previously_Insured)
+df$Gender <- as.factor(df$Gender)
+df$Driving_License <- as.factor(df$Driving_License)
+df$Vehicle_Age <- as.factor(df$Vehicle_Age)
+df$Vehicle_Damage <- as.factor(df$Vehicle_Damage)
+```
+
+### Test Train Split
+
+```{r}
+set.seed(1010137629)
+#Stratified Split
+index <- createDataPartition(df$Response, p = 0.8, list = FALSE)
+train <- df[index, ]
+test <- df[-index, ]
+```
+
+### Data Preprocessing
+
+```{r}
+#dummy_transform <- dummyVars(" ~ .", data = preprocessed_df)
+dummy_transform <- dummyVars(" ~ .", data = train)
+
+# Apply the dummy transformation to the data
+#preprocessed_df <- data.frame(predict(dummy_transform, newdata = preprocessed_df))
+preprocessed_df <- data.frame(predict(dummy_transform, newdata = train))
+```
+
+```{r}
+preprocessed_df$Annual_Premium <- log(preprocessed_df$Annual_Premium)
+```
+
+```{r}
+y <- preprocessed_df$Response
+#y <- as.factor(y)
+X <- as.matrix(preprocessed_df[, !names(preprocessed_df) %in% 'Response'])
+```
+
+### Modelling
+
+```{r}
+set.seed(1010137629)
+lasso_model <- cv.glmnet(X, y, family = "binomial", alpha = 1, verbose=TRUE)
+```
+
+```{r}
+plot(lasso_model)
+```
+
+```{r}
+#0.0002464987
+minimum_lambda <- lasso_model$lambda.min
+```
+
+
+```{r}
+set.seed(1010137629)
+model <- glmnet(X, y, family = "binomial", alpha = 1, verbose=TRUE, lambda = minimum_lambda)
+model
+```
+### Model Coefficients
+
+```{r}
+cat(sum(coef(model)[,'s0'] == 0.0), ' categories were dropped')
+```
+```{r}
+sort(abs(coef(model)[,'s0']))
+```
+
+### Prediction on Training
+
+```{r}
+predictions <- predict(model, newx = X, type = "response")
+```
+
+
+```{r}
+options(scipen = 999)
+result_df <- data.frame(Actual = y, Predictions = predictions)
+result_df$Brier_Score <- (result_df$Actual - result_df$s0)^2
+#0 being the majority class
+result_df$Baseline_Brier_Score <- (result_df$Actual - 0)^2
+result_df
+```
+
+```{r}
+cat('Brier Score: ', mean(result_df$Brier_Score), '\n', 'Baseline Brier Score: ',
+    mean(result_df$Baseline_Brier_Score))
+```
+
+```{r}
+# Create a reliability diagram
+reliability.plot(verify(result_df$Actual, result_df$s0, nbins=20))
+```
+### Testing
+
+```{r}
+dummy_transform <- dummyVars(" ~ .", data = test)
+
+# Apply the dummy transformation to the data
+#preprocessed_df <- data.frame(predict(dummy_transform, newdata = preprocessed_df))
+preprocessed_df_test <- data.frame(predict(dummy_transform, newdata = test))
+```
+
+```{r}
+preprocessed_df_test$Annual_Premium <- log(preprocessed_df_test$Annual_Premium)
+```
+
+```{r}
+y_test <- preprocessed_df_test$Response
+#y <- as.factor(y)
+X_test <- as.matrix(preprocessed_df_test[, !names(preprocessed_df_test) %in% 'Response'])
+```
+
+```{r}
+predictions_test <- predict(model, newx = X_test, type = "response")
+```
+
+
+```{r}
+result_df_test <- data.frame(Actual = y_test, Predictions = predictions_test)
+result_df_test$Brier_Score <- (result_df_test$Actual - result_df_test$s0)^2
+#0 being the majority class
+result_df_test$Baseline_Brier_Score <- (result_df_test$Actual - 0)^2
+result_df_test
+```
+```{r}
+cat('Brier Score: ', mean(result_df_test$Brier_Score), '\n', 'Baseline Brier Score: ',
+    mean(result_df_test$Baseline_Brier_Score))
+```
+```{r}
+cat('Our Model performs ',(1 - (0.09531107 / 0.1637708) ) * 100, '% better than the baseline')
+```
+```{r}
+reliability.plot(verify(result_df_test$Actual, result_df_test$s0, nbins=20))
+```
+
+```{r}
+final_df <- data.frame(test)
+final_df <- cbind(final_df, predictions_test)
+final_df$expectedRev <- final_df$s0 * final_df$Annual_Premium
+```
+
+```{r}
+hist(final_df$expectedRev, breaks = 100, xlim = c(0, 50000), ylim = c(0, 30000),
+     main = "Expected Revenue Distribution",
+     xlab = "Expected Revenue",
+     ylab = "Frequency")
+```
+```{r}
+hist(final_df$Annual_Premium * final_df$Response, breaks = 100, xlim = c(0, 100000),  ylim = c(0, 30000),
+     main = "Expected Revenue Distribution",
+     xlab = "Expected Revenue",
+     ylab = "Frequency")
+```
+
+
